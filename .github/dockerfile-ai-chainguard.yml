@@ -1,0 +1,129 @@
+name: Smart Dockerfile Optimizer + Chainguard Scan
+
+on:
+  pull_request:
+    paths:
+      - '**/Dockerfile'
+
+jobs:
+  optimize:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install hadolint
+        run: |
+          curl -sL https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64 \
+            -o /usr/local/bin/hadolint
+          chmod +x /usr/local/bin/hadolint
+
+      - name: Install dive
+        run: |
+          wget https://github.com/wagoodman/dive/releases/latest/download/dive_0.12.0_linux_amd64.deb
+          sudo dpkg -i dive_0.12.0_linux_amd64.deb
+
+      - name: Run lint + layer report
+        run: |
+          hadolint Dockerfile || true > lint.txt
+          docker build . -t temp-image
+          dive temp-image --ci || true > dive.txt
+
+      # === Chainguard Scan Combined Into This Workflow ===
+      - name: Run Chainguard Check
+        id: chainguard
+        run: |
+          REPORT_FILE="chainguard_report.txt"
+          echo "🔍 Checking Dockerfile for Chainguard images..." > "$REPORT_FILE"
+          line_number=0
+          while IFS= read -r line; do
+              ((line_number++))
+              if [[ "$line" =~ ^FROM ]]; then
+                  base=$(echo "$line" | awk '{print $2}')
+                  stage=$(echo "$line" | awk '{print $3}')
+                  if [[ "$base" != cgr.dev/chainguard/* ]]; then
+                      if [[ "$base" =~ hardened_alpine ]]; then
+                          echo "Line $line_number: Stage ${stage:-<none>} → Suggest: containers.cisco.com/sto-ccc-cloud9/hardened_alpine:3.22  (Go build)" >> "$REPORT_FILE"
+                      elif [[ "$base" =~ scratch ]]; then
+                          echo "Line $line_number: Stage ${stage:-<none>} → Suggest: cgr.dev/chainguard/static:latest  (Static runtime)" >> "$REPORT_FILE"
+                      elif [[ "$base" =~ base ]]; then
+                          echo "Line $line_number: Stage ${stage:-<none>} → Suggest: artifactory.devhub-cloud.cisco.com/sto-cg-docker/chainguard-base-fips  (Dynamic runtime)" >> "$REPORT_FILE"
+                      elif [[ "$base" =~ golang ]]; then
+                          echo "Line $line_number: Stage ${stage:-<none>} → Suggest: artifactory.devhub-cloud.cisco.com/sto-cg-docker/go-fips:1.25.1.1-dev  (Go runtime)" >> "$REPORT_FILE"
+                      else
+                          echo "Line $line_number: Stage ${stage:-<none>} → No direct mapping found, check Chainguard catalog" >> "$REPORT_FILE"
+                      fi
+                  fi
+              fi
+          done < Dockerfile
+          if [ ! -s "$REPORT_FILE" ]; then
+              echo "✅ All base images are already Chainguard." >> "$REPORT_FILE"
+          fi
+
+      # === AI Optimization Step ===
+      - name: Optimize Dockerfile using AI
+        id: ai
+        run: |
+          LINT_REPORT=$(cat lint.txt)
+          DIVE_REPORT=$(cat dive.txt)
+          CG_SUGGESTIONS=$(cat chainguard_report.txt)
+
+          PROMPT=$(cat <<EOF
+You are an AI DevOps expert acting as a "Smart Dockerfile Optimizer & Security Hardener".
+
+Tasks:
+1. Read the Dockerfile, lint report, layer analysis, Chainguard scan results.
+2. Apply optimizations for:
+   - Layer reduction
+   - Go build caching
+   - Smaller runtime image
+   - Non-root security
+3. Apply Chainguard base images according to the suggestions when possible:
+$CG_SUGGESTIONS
+4. Return:
+   - A working optimized Dockerfile in a \`\`\`dockerfile\`\`\` block
+   - A "Change / Reason / Impact" table
+   - Layer reduction + size savings estimation
+EOF
+)
+          PROMPT="$PROMPT
+
+Lint report:
+$LINT_REPORT
+
+Layer analysis:
+$DIVE_REPORT
+
+Original Dockerfile:
+$(cat Dockerfile)
+"
+
+          RESPONSE=$(curl https://api.openai.com/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $OPENAI_API_KEY" \
+            -d "$(jq -n \
+              --arg prompt "$PROMPT" \
+              '{model: "gpt-4o", messages: [{role: "user", content: $prompt}], temperature: 0}')" )
+
+          echo "$RESPONSE" > ai_output.json
+          AI_DOCKERFILE=$(jq -r '.choices[0].message.content' ai_output.json)
+          echo "$AI_DOCKERFILE" > ai_dockerfile_output.txt
+
+      - name: Post Combined PR Comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const cg = fs.readFileSync('chainguard_report.txt', 'utf8');
+            const ai = fs.readFileSync('ai_dockerfile_output.txt', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🛡 **Chainguard Base Image Scan Results**\n\n${cg}\n\n🤖 **AI Optimized Dockerfile & Analysis**\n\n${ai}`
+            });
+
