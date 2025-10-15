@@ -3,7 +3,7 @@ pipeline {
 
     environment {
         IMAGE_NAME = "docker-analyze-pr-${env.BUILD_ID}"
-        GITHUB_TOKEN = credentials('GITHUB_CREDENTIALS') // GitHub token
+        GITHUB_CREDENTIALS = credentials('GITHUB_CREDENTIALS') // GitHub token
         //OPENAI_API_KEY = credentials('OPENAI_API_KEY')   // Optional for AI suggestions
     }
 
