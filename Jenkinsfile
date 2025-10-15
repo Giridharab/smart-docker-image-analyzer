@@ -11,7 +11,9 @@ pipeline {
 
         stage('Checkout') {
             steps {
-                checkout scm
+                git branch: 'main',
+                    url: 'https://github.com/Giridharab/smart-docker-image-analyzer.git',
+                    credentialsId: 'GITHUB_CREDENTIALS'
             }
         }
 
