@@ -1,5 +1,5 @@
 # Build stage using Alpine with Go (not Chainguard)
-FROM golang:1.20-alpine AS build
+FROM cgr.dev/chainguard/go:latest AS build
 
 ENV CGO_ENABLED=0 \
     GOOS=linux
@@ -13,7 +13,7 @@ COPY . .
 RUN go build -o myapp main.go
 
 # Runtime stage using scratch (not Chainguard)
-FROM scratch
+FROM cgr.dev/chainguard/distroless-base:latest
 WORKDIR /app
 
 COPY --from=build /src/myapp .
