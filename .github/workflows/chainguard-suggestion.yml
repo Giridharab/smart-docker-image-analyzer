@@ -1,0 +1,64 @@
+name: Suggest Chainguard Images
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  suggest-chainguard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Find Dockerfiles
+        id: find_dockerfiles
+        run: |
+          files=$(find . -type f -name 'Dockerfile')
+          echo "dockerfiles=$files" >> $GITHUB_OUTPUT
+
+      - name: Suggest Chainguard images in PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const dockerfiles = process.env.DOCKERFILES.split(" ");
+            const suggestions = [];
+
+            for (const file of dockerfiles) {
+              const content = await require('fs').promises.readFile(file, 'utf8');
+              let fileSuggestions = [];
+
+              // Check builder stage
+              const builderMatch = content.match(/^FROM .* AS build/m);
+              if (!builderMatch || !builderMatch[0].includes("chainguard/golang")) {
+                fileSuggestions.push(`- Builder stage: Consider replacing \`${builderMatch ? builderMatch[0] : 'missing'}\` with \`ghcr.io/chainguard/golang:1.20 AS build\``);
+              }
+
+              // Check runtime stage
+              const runtimeMatch = content.match(/^FROM .*$/gm)?.slice(-1)[0];
+              if (!runtimeMatch || !runtimeMatch.includes("chainguard/static")) {
+                fileSuggestions.push(`- Runtime stage: Consider replacing \`${runtimeMatch || 'missing'}\` with \`ghcr.io/chainguard/static:latest\``);
+              }
+
+              if (fileSuggestions.length > 0) {
+                suggestions.push(`**Suggestions for \`${file}\`:**\n${fileSuggestions.join("\n")}`);
+              }
+            }
+
+            if (suggestions.length > 0) {
+              const body = suggestions.join("\n\n");
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            } else {
+              console.log("All Dockerfiles already use Chainguard images ✅");
+            }
+        env:
+          DOCKERFILES: ${{ steps.find_dockerfiles.outputs.dockerfiles }}
+
