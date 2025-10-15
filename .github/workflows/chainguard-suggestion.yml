@@ -13,52 +13,45 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.ref }}
 
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Find Dockerfiles
-        id: find_dockerfiles
+        id: dockerfiles
         run: |
           files=$(find . -type f -name 'Dockerfile')
           echo "dockerfiles=$files" >> $GITHUB_OUTPUT
 
-      - name: Suggest Chainguard images in PR
+      - name: Comment PR Suggestions
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            const fs = require('fs');
             const dockerfiles = process.env.DOCKERFILES.split(" ");
-            const suggestions = [];
-
             for (const file of dockerfiles) {
-              const content = await require('fs').promises.readFile(file, 'utf8');
-              let fileSuggestions = [];
+              const content = fs.readFileSync(file, 'utf8');
+              let suggestions = [];
 
-              // Check builder stage
               const builderMatch = content.match(/^FROM .* AS build/m);
               if (!builderMatch || !builderMatch[0].includes("chainguard/golang")) {
-                fileSuggestions.push(`- Builder stage: Consider replacing \`${builderMatch ? builderMatch[0] : 'missing'}\` with \`ghcr.io/chainguard/golang:1.20 AS build\``);
+                suggestions.push(`Builder stage: replace \`${builderMatch ? builderMatch[0] : 'missing'}\` with \`ghcr.io/chainguard/golang:1.20 AS build\``);
               }
 
-              // Check runtime stage
               const runtimeMatch = content.match(/^FROM .*$/gm)?.slice(-1)[0];
               if (!runtimeMatch || !runtimeMatch.includes("chainguard/static")) {
-                fileSuggestions.push(`- Runtime stage: Consider replacing \`${runtimeMatch || 'missing'}\` with \`ghcr.io/chainguard/static:latest\``);
+                suggestions.push(`Runtime stage: replace \`${runtimeMatch || 'missing'}\` with \`ghcr.io/chainguard/static:latest\``);
               }
 
-              if (fileSuggestions.length > 0) {
-                suggestions.push(`**Suggestions for \`${file}\`:**\n${fileSuggestions.join("\n")}`);
+              if (suggestions.length > 0) {
+                await github.rest.pulls.createReview({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.pull_request.number,
+                  event: 'COMMENT',
+                  body: `**Suggestions for \`${file}\`:**\n- ${suggestions.join('\n- ')}`
+                });
               }
-            }
-
-            if (suggestions.length > 0) {
-              const body = suggestions.join("\n\n");
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body: body
-              });
-            } else {
-              console.log("All Dockerfiles already use Chainguard images ✅");
             }
         env:
-          DOCKERFILES: ${{ steps.find_dockerfiles.outputs.dockerfiles }}
-
+          DOCKERFILES: ${{ steps.dockerfiles.outputs.dockerfiles }}
